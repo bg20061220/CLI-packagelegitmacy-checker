@@ -19,7 +19,7 @@ async def fetch_metadata(package: str, version: str | None = None) -> dict:
         data = r.json()
 
     info = data["info"]
-    releases = data["releases"]
+    releases = data.get("releases", {})
 
     # Earliest release date across all versions
     all_dates = []
@@ -37,10 +37,12 @@ async def fetch_metadata(package: str, version: str | None = None) -> dict:
     candidates = list(project_urls.values()) + [info.get("home_page") or ""]
     github_url = next((u for u in candidates if u and "github.com" in u), None)
 
-    # Source tarball URL for the target version
+    # Source tarball URL — version-specific endpoint puts files under data["urls"],
+    # the non-version endpoint puts them under releases[version]
     target_version = version or info["version"]
     tarball_url = None
-    for f in releases.get(target_version, []):
+    candidate_files = data.get("urls") or releases.get(target_version, [])
+    for f in candidate_files:
         if f.get("packagetype") == "sdist":
             tarball_url = f["url"]
             break

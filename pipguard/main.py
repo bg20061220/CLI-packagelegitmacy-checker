@@ -25,11 +25,11 @@ async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[d
         if cached:
             return cached, True
 
-    # Layer 1: trust signals — run in parallel
-    metadata, download_stats, vulns = await asyncio.gather(
-        pypi.fetch_metadata(package, version),
+    # Fetch metadata first to resolve the exact version, then query OSV with it
+    metadata = await pypi.fetch_metadata(package, version)
+    download_stats, vulns = await asyncio.gather(
         pypi.fetch_download_stats(package),
-        osv.check_vulns(package, version or ""),
+        osv.check_vulns(package, metadata["version"]),
     )
 
     # Classifier gating: decide whether to call GitHub README
