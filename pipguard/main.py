@@ -231,5 +231,91 @@ def update(
         console.print("Use [bold]pipguard update --force[/bold] to refresh CVE cache immediately.")
 
 
+@app.command()
+def configure():
+    """Set up automatic pip interception for your shell."""
+    import os
+    import platform
+
+    BASH_ZSH_FUNC = """
+# pipguard — intercept pip install
+pip() {
+    if [ "$1" = "install" ]; then
+        pipguard install "${@:2}"
+    else
+        command pip "$@"
+    fi
+}
+"""
+
+    FISH_FUNC = """
+# pipguard — intercept pip install
+function pip
+    if test "$argv[1]" = "install"
+        pipguard install $argv[2..]
+    else
+        command pip $argv
+    end
+end
+"""
+
+    POWERSHELL_FUNC = """
+# pipguard — intercept pip install
+function pip {
+    if ($args[0] -eq "install") {
+        pipguard install @($args | Select-Object -Skip 1)
+    } else {
+        & (Get-Command pip -CommandType Application | Select-Object -First 1).Source @args
+    }
+}
+"""
+
+    MARKER = "# pipguard — intercept pip install"
+
+    def already_configured(path: Path) -> bool:
+        return path.exists() and MARKER in path.read_text()
+
+    def append_to(path: Path, content: str):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a") as f:
+            f.write(content)
+
+    # Detect shell and config file
+    if platform.system() == "Windows":
+        # PowerShell
+        ps_profile = Path(os.environ.get("USERPROFILE", "~")) / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+        if already_configured(ps_profile):
+            console.print("[yellow]pipguard is already configured in your PowerShell profile.[/yellow]")
+            return
+        append_to(ps_profile, POWERSHELL_FUNC)
+        console.print(f"[green]Done![/green] Added pip interceptor to:\n  {ps_profile}")
+        console.print("\nReload your shell or run:")
+        console.print("  [bold]. $PROFILE[/bold]")
+
+    else:
+        shell = os.environ.get("SHELL", "")
+        if "zsh" in shell:
+            config = Path.home() / ".zshrc"
+            func = BASH_ZSH_FUNC
+        elif "fish" in shell:
+            config = Path.home() / ".config" / "fish" / "config.fish"
+            func = FISH_FUNC
+        else:
+            config = Path.home() / ".bashrc"
+            func = BASH_ZSH_FUNC
+
+        if already_configured(config):
+            console.print(f"[yellow]pipguard is already configured in {config}[/yellow]")
+            return
+
+        append_to(config, func)
+        console.print(f"[green]Done![/green] Added pip interceptor to:\n  {config}")
+        console.print("\nReload your shell or run:")
+        console.print(f"  [bold]source {config}[/bold]")
+
+    console.print("\nFrom now on, [bold]pip install <package>[/bold] will automatically run through pipguard.")
+    console.print("To remove, delete the pip() function from the config file shown above.")
+
+
 if __name__ == "__main__":
     app()
