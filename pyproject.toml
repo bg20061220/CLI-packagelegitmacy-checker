@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pipguard-cli"
-version = "0.1.3"
+version = "0.1.4"
 description = "Supply chain attack prevention for pip installs"
 readme = "README.md"
 requires-python = ">=3.10"
