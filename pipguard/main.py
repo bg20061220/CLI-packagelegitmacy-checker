@@ -15,6 +15,78 @@ app = typer.Typer(
     add_completion=False,
 )
 
+HOOK_MARKER = "# pipguard — intercept pip install"
+
+BASH_ZSH_FUNC = """
+# pipguard — intercept pip install
+pip() {
+    if [ "$1" = "install" ]; then
+        shift
+        if [ "$#" -eq 1 ]; then
+            case "$1" in
+                -*|.|/*|./*|../*|*://*|git+*|*.whl|*.tar.gz|*.zip)
+                    command pip install "$@"
+                    ;;
+                *)
+                    pipguard install "$1"
+                    ;;
+            esac
+        else
+            command pip install "$@"
+        fi
+    else
+        command pip "$@"
+    fi
+}
+"""
+
+FISH_FUNC = """
+# pipguard — intercept pip install
+function pip
+    if test "$argv[1]" = "install"
+        set install_args $argv[2..-1]
+        if test (count $install_args) -eq 1
+            switch $install_args[1]
+                case '-*' '.' '/*' './*' '../*' '*://*' 'git+*' '*.whl' '*.tar.gz' '*.zip'
+                    command pip install $install_args
+                case '*'
+                    pipguard install $install_args[1]
+            end
+        else
+            command pip install $install_args
+        end
+    else
+        command pip $argv
+    end
+end
+"""
+
+POWERSHELL_FUNC = """
+# pipguard — intercept pip install
+function pip {
+    if ($args[0] -eq "install") {
+        $installArgs = @($args | Select-Object -Skip 1)
+        if ($installArgs.Count -eq 1) {
+            $target = [string]$installArgs[0]
+            if (
+                $target -match '^(?:-|\\.|/|\\\\|\\.\\\\|\\.\\./|https?://|git\\+)'
+                -or $target -like '*.whl'
+                -or $target -like '*.tar.gz'
+                -or $target -like '*.zip'
+            ) {
+                & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
+            } else {
+                pipguard install $target
+            }
+        } else {
+            & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
+        }
+    } else {
+        & (Get-Command pip -CommandType Application | Select-Object -First 1).Source @args
+    }
+}
+"""
+
 
 def _split_pinned_package(package: str, version: str | None) -> tuple[str, str | None]:
     """Support pip-style pinning like package==1.2.3 across commands."""
@@ -250,80 +322,8 @@ def configure():
     import os
     import platform
 
-    BASH_ZSH_FUNC = """
-# pipguard — intercept pip install
-pip() {
-    if [ "$1" = "install" ]; then
-        shift
-        if [ "$#" -eq 1 ]; then
-            case "$1" in
-                -*|.|/*|./*|../*|*://*|git+*|*.whl|*.tar.gz|*.zip)
-                    command pip install "$@"
-                    ;;
-                *)
-                    pipguard install "$1"
-                    ;;
-            esac
-        else
-            command pip install "$@"
-        fi
-    else
-        command pip "$@"
-    fi
-}
-"""
-
-    FISH_FUNC = """
-# pipguard — intercept pip install
-function pip
-    if test "$argv[1]" = "install"
-        set install_args $argv[2..-1]
-        if test (count $install_args) -eq 1
-            switch $install_args[1]
-                case '-*' '.' '/*' './*' '../*' '*://*' 'git+*' '*.whl' '*.tar.gz' '*.zip'
-                    command pip install $install_args
-                case '*'
-                    pipguard install $install_args[1]
-            end
-        else
-            command pip install $install_args
-        end
-    else
-        command pip $argv
-    end
-end
-"""
-
-    POWERSHELL_FUNC = """
-# pipguard — intercept pip install
-function pip {
-    if ($args[0] -eq "install") {
-        $installArgs = @($args | Select-Object -Skip 1)
-        if ($installArgs.Count -eq 1) {
-            $target = [string]$installArgs[0]
-            if (
-                $target -match '^(?:-|\\.|/|\\\\|\\.\\\\|\\.\\./|https?://|git\\+)'
-                -or $target -like '*.whl'
-                -or $target -like '*.tar.gz'
-                -or $target -like '*.zip'
-            ) {
-                & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
-            } else {
-                pipguard install $target
-            }
-        } else {
-            & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
-        }
-    } else {
-        & (Get-Command pip -CommandType Application | Select-Object -First 1).Source @args
-    }
-}
-"""
-
-    MARKER = "# pipguard — intercept pip install"
-
     def already_configured(path: Path) -> bool:
-        return path.exists() and MARKER in path.read_text()
+        return path.exists() and HOOK_MARKER in path.read_text()
 
     def append_to(path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -22,6 +22,41 @@ _HOME_STRINGS = ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.netrc"]
 _HOME_ENV_VARS = {"HOME", "USERPROFILE"}
 _STRING_NETWORK_PATTERNS = ("curl ", "wget ", "http://", "https://")
 _STRING_SHELL_PATTERNS = ("| bash", "bash -c", "sh -c", "powershell ")
+_PYPROJECT_SUSPICIOUS_TOKENS = {
+    "backend-path",
+    "bootstrap",
+    "build-system",
+    "cmd",
+    "command",
+    "commands",
+    "dependencies",
+    "entry-points",
+    "exec",
+    "hook",
+    "hooks",
+    "optional-dependencies",
+    "post-install",
+    "pre-install",
+    "requires",
+    "run",
+    "script",
+    "scripts",
+    "task",
+    "tasks",
+}
+_PYPROJECT_METADATA_TOKENS = {
+    "changelog",
+    "documentation",
+    "homepage",
+    "issue",
+    "issues",
+    "repository",
+    "source",
+    "sources",
+    "tracker",
+    "url",
+    "urls",
+}
 
 
 def _empty_flags() -> dict[str, bool]:
@@ -89,15 +124,50 @@ def _scan_text_value(text: str, flags: dict[str, bool]) -> None:
         flags["dynamic_exec"] = True
 
 
-def _walk_pyproject_value(value: object, flags: dict[str, bool]) -> None:
+def _normalize_pyproject_path(path: tuple[str, ...]) -> list[str]:
+    return [segment.lower().replace("_", "-").replace(" ", "-") for segment in path]
+
+
+def _path_has_token(path: tuple[str, ...], tokens: set[str]) -> bool:
+    normalized = _normalize_pyproject_path(path)
+    return any(token in segment for segment in normalized for token in tokens)
+
+
+def _scan_pyproject_string(text: str, path: tuple[str, ...], flags: dict[str, bool]) -> None:
+    lowered = text.lower()
+    suspicious_path = _path_has_token(path, _PYPROJECT_SUSPICIOUS_TOKENS)
+    metadata_path = _path_has_token(path, _PYPROJECT_METADATA_TOKENS)
+
+    if any(pattern in lowered for pattern in ("curl ", "wget ")):
+        flags["network_call"] = True
+    elif (
+        any(pattern in lowered for pattern in ("http://", "https://"))
+        and suspicious_path
+        and not metadata_path
+    ):
+        flags["network_call"] = True
+
+    if any(pattern in lowered for pattern in _STRING_SHELL_PATTERNS):
+        flags["shell_exec"] = True
+    if any(path_value in text for path_value in _HOME_STRINGS):
+        flags["home_dir_access"] = True
+    if "os.environ" in text or "os.getenv" in text:
+        flags["env_access"] = True
+    if "base64.b64decode" in text or "base64.decodebytes" in text:
+        flags["base64_obfuscation"] = True
+    if any(pattern in text for pattern in ("eval(", "exec(", "getattr(", "__import__(")):
+        flags["dynamic_exec"] = True
+
+
+def _walk_pyproject_value(value: object, flags: dict[str, bool], path: tuple[str, ...] = ()) -> None:
     if isinstance(value, str):
-        _scan_text_value(value, flags)
+        _scan_pyproject_string(value, path, flags)
     elif isinstance(value, dict):
-        for nested in value.values():
-            _walk_pyproject_value(nested, flags)
+        for key, nested in value.items():
+            _walk_pyproject_value(nested, flags, path + (str(key),))
     elif isinstance(value, list):
         for nested in value:
-            _walk_pyproject_value(nested, flags)
+            _walk_pyproject_value(nested, flags, path)
 
 
 class _FlagVisitor(ast.NodeVisitor):

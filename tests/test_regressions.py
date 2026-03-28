@@ -1,3 +1,6 @@
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -50,6 +53,18 @@ class AnalyzerTests(unittest.TestCase):
         self.assertTrue(pyproject_flags["network_call"])
         self.assertTrue(pyproject_flags["shell_exec"])
 
+    def test_pyproject_metadata_urls_are_not_flagged_as_network_calls(self):
+        flags = analyzer._analyze_pyproject(
+            '[project.urls]\nHomepage = "https://example.com"\nDocumentation = "https://docs.example.com"\n'
+        )
+        self.assertFalse(flags["network_call"])
+
+    def test_pyproject_dependency_urls_remain_flagged(self):
+        flags = analyzer._analyze_pyproject(
+            '[project]\ndependencies = ["demo @ https://example.com/demo.whl"]\n'
+        )
+        self.assertTrue(flags["network_call"])
+
 
 class MainTests(unittest.TestCase):
     def test_split_pinned_package(self):
@@ -61,6 +76,16 @@ class MainTests(unittest.TestCase):
             main._split_pinned_package("urllib3", "1.25.2"),
             ("urllib3", "1.25.2"),
         )
+
+    def test_hook_templates_include_intercept_and_passthrough_logic(self):
+        self.assertIn("pipguard install", main.BASH_ZSH_FUNC)
+        self.assertIn('command pip install "$@"', main.BASH_ZSH_FUNC)
+
+        self.assertIn("pipguard install", main.FISH_FUNC)
+        self.assertIn("command pip install $install_args", main.FISH_FUNC)
+
+        self.assertIn("pipguard install", main.POWERSHELL_FUNC)
+        self.assertIn("Source install @installArgs", main.POWERSHELL_FUNC)
 
 
 class CacheTests(unittest.TestCase):
@@ -119,6 +144,106 @@ class ScorerTests(unittest.TestCase):
 
         self.assertEqual(breakdown["signals"]["Dynamic execution / obfuscation"], 40)
         self.assertEqual(breakdown["verdict"], "MEDIUM")
+
+
+class ShellHookRuntimeTests(unittest.TestCase):
+    def _write_stub(self, path: Path, name: str):
+        path.write_text(
+            "#!/bin/sh\n"
+            "printf '%s' '" + name + "' >> \"$HOOK_LOG\"\n"
+            "for arg in \"$@\"; do\n"
+            "  printf '|%s' \"$arg\" >> \"$HOOK_LOG\"\n"
+            "done\n"
+            "printf '\\n' >> \"$HOOK_LOG\"\n"
+        )
+        path.chmod(0o755)
+
+    def _setup_runtime_dir(self) -> tuple[Path, Path, dict[str, str]]:
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+
+        root = Path(tempdir.name)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        hook_file = root / "hook.sh"
+        hook_file.write_text(main.BASH_ZSH_FUNC)
+        log_file = root / "hook.log"
+
+        self._write_stub(bin_dir / "pip", "pip")
+        self._write_stub(bin_dir / "pipguard", "pipguard")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["HOOK_LOG"] = str(log_file)
+        return hook_file, log_file, env
+
+    def _run_bash_hook(self, pip_command: str) -> list[str]:
+        hook_file, log_file, env = self._setup_runtime_dir()
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-lc", f'source "{hook_file}"; {pip_command}'],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        return log_file.read_text().splitlines()
+
+    def test_bash_hook_intercepts_simple_install(self):
+        lines = self._run_bash_hook("pip install idna==3.11")
+        self.assertEqual(lines, ["pipguard|install|idna==3.11"])
+
+    def test_bash_hook_passthroughs_common_pip_install_forms(self):
+        cases = {
+            "pip install --upgrade idna": "pip|install|--upgrade|idna",
+            "pip install idna certifi": "pip|install|idna|certifi",
+            "pip install -r requirements.txt": "pip|install|-r|requirements.txt",
+            "pip install ./dist/demo.whl": "pip|install|./dist/demo.whl",
+        }
+
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                lines = self._run_bash_hook(command)
+                self.assertEqual(lines, [expected])
+
+    def _run_optional_shell(self, shell: str, command: str, hook_content: str) -> list[str]:
+        if shutil.which(shell) is None:
+            self.skipTest(f"{shell} is not installed")
+
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+
+        root = Path(tempdir.name)
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        hook_file = root / f"hook.{shell}"
+        hook_file.write_text(hook_content)
+        log_file = root / "hook.log"
+
+        self._write_stub(bin_dir / "pip", "pip")
+        self._write_stub(bin_dir / "pipguard", "pipguard")
+
+        env = os.environ.copy()
+        env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["HOOK_LOG"] = str(log_file)
+
+        if shell == "fish":
+            args = [shell, "--private", "-c", f'source "{hook_file}"; {command}']
+        else:
+            args = [shell, "-NoProfile", "-Command", f'. "{hook_file}"; {command}']
+
+        result = subprocess.run(args, capture_output=True, text=True, env=env, check=False)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        return log_file.read_text().splitlines()
+
+    def test_fish_hook_runtime_if_available(self):
+        lines = self._run_optional_shell("fish", "pip install requests", main.FISH_FUNC)
+        self.assertEqual(lines, ["pipguard|install|requests"])
+
+    def test_powershell_hook_runtime_if_available(self):
+        shell = "pwsh" if shutil.which("pwsh") else "powershell"
+        lines = self._run_optional_shell(shell, "pip install requests", main.POWERSHELL_FUNC)
+        self.assertEqual(lines, ["pipguard|install|requests"])
 
 
 if __name__ == "__main__":
