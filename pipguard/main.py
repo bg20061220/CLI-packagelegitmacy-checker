@@ -68,6 +68,9 @@ def install(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
     """Analyze a package for supply chain risks, then install it."""
+    # Handle pip-style pinning: pipguard install pillow==9.1.0
+    if "==" in package and version is None:
+        package, version = package.split("==", 1)
     try:
         result, cached = asyncio.run(_analyze(package, version, no_cache))
     except Exception as e:
@@ -282,8 +285,12 @@ function pip {
 
     # Detect shell and config file
     if platform.system() == "Windows":
-        # PowerShell
-        ps_profile = Path(os.environ.get("USERPROFILE", "~")) / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+        # Ask PowerShell for the real $PROFILE path — handles OneDrive and custom locations
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "$PROFILE"],
+            capture_output=True, text=True
+        )
+        ps_profile = Path(result.stdout.strip())
         if already_configured(ps_profile):
             console.print("[yellow]pipguard is already configured in your PowerShell profile.[/yellow]")
             return
