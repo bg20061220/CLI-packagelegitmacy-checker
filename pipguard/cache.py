@@ -7,7 +7,6 @@ CACHE_DIR = Path.home() / ".pipguard"
 CACHE_DB = CACHE_DIR / "cache.db"
 
 TTL_TRUST = 86_400  # 24 hours
-TTL_VULN = 21_600   # 6 hours
 
 
 def _conn() -> sqlite3.Connection:
@@ -46,6 +45,6 @@ def set(key: str, value: dict, ttl: int) -> None:
 
 
 def clear_vuln() -> None:
-    """Wipe all CVE/vulnerability cache entries (for pipguard update --force)."""
+    """Wipe cached analyses so vulnerability data is refreshed immediately."""
     with _conn() as con:
-        con.execute("DELETE FROM cache WHERE key LIKE 'osv:%'")
+        con.execute("DELETE FROM cache WHERE key LIKE 'osv:%' OR key LIKE 'full:%'")
