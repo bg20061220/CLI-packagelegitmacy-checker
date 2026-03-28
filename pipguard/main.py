@@ -15,6 +15,85 @@ app = typer.Typer(
     add_completion=False,
 )
 
+HOOK_MARKER = "# pipguard — intercept pip install"
+
+BASH_ZSH_FUNC = """
+# pipguard — intercept pip install
+pip() {
+    if [ "$1" = "install" ]; then
+        shift
+        if [ "$#" -eq 1 ]; then
+            case "$1" in
+                -*|.|/*|./*|../*|*://*|git+*|*.whl|*.tar.gz|*.zip)
+                    command pip install "$@"
+                    ;;
+                *)
+                    pipguard install "$1"
+                    ;;
+            esac
+        else
+            command pip install "$@"
+        fi
+    else
+        command pip "$@"
+    fi
+}
+"""
+
+FISH_FUNC = """
+# pipguard — intercept pip install
+function pip
+    if test "$argv[1]" = "install"
+        set install_args $argv[2..-1]
+        if test (count $install_args) -eq 1
+            switch $install_args[1]
+                case '-*' '.' '/*' './*' '../*' '*://*' 'git+*' '*.whl' '*.tar.gz' '*.zip'
+                    command pip install $install_args
+                case '*'
+                    pipguard install $install_args[1]
+            end
+        else
+            command pip install $install_args
+        end
+    else
+        command pip $argv
+    end
+end
+"""
+
+POWERSHELL_FUNC = """
+# pipguard — intercept pip install
+function pip {
+    if ($args[0] -eq "install") {
+        $installArgs = @($args | Select-Object -Skip 1)
+        if ($installArgs.Count -eq 1) {
+            $target = [string]$installArgs[0]
+            if (
+                $target -match '^(?:-|\\.|/|\\\\|\\.\\\\|\\.\\./|https?://|git\\+)'
+                -or $target -like '*.whl'
+                -or $target -like '*.tar.gz'
+                -or $target -like '*.zip'
+            ) {
+                & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
+            } else {
+                pipguard install $target
+            }
+        } else {
+            & (Get-Command pip -CommandType Application | Select-Object -First 1).Source install @installArgs
+        }
+    } else {
+        & (Get-Command pip -CommandType Application | Select-Object -First 1).Source @args
+    }
+}
+"""
+
+
+def _split_pinned_package(package: str, version: str | None) -> tuple[str, str | None]:
+    """Support pip-style pinning like package==1.2.3 across commands."""
+    if "==" in package and version is None:
+        package, version = package.split("==", 1)
+    return package, version
+
 
 async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[dict, bool]:
     """Core analysis pipeline. Returns (result_dict, was_cached)."""
@@ -68,9 +147,7 @@ def install(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
 ):
     """Analyze a package for supply chain risks, then install it."""
-    # Handle pip-style pinning: pipguard install pillow==9.1.0
-    if "==" in package and version is None:
-        package, version = package.split("==", 1)
+    package, version = _split_pinned_package(package, version)
     try:
         result, cached = asyncio.run(_analyze(package, version, no_cache))
     except Exception as e:
@@ -108,6 +185,7 @@ def info(
     no_cache: bool = typer.Option(False, "--no-cache"),
 ):
     """Show a risk report without installing."""
+    package, version = _split_pinned_package(package, version)
     try:
         result, cached = asyncio.run(_analyze(package, version, no_cache))
     except Exception as e:
@@ -222,16 +300,20 @@ def history():
 
 @app.command()
 def update(
-    force: bool = typer.Option(False, "--force", help="Wipe and refresh all CVE cache entries"),
+    force: bool = typer.Option(
+        False, "--force", help="Wipe cached analyses so vulnerability data is refreshed"
+    ),
 ):
     """Manage the pipguard cache."""
     if force:
         cache.clear_vuln()
         console.print(
-            "[green]CVE cache cleared.[/green] Fresh vulnerability data will be fetched on next scan."
+            "[green]Cached analyses cleared.[/green] Fresh vulnerability data will be fetched on next scan."
         )
     else:
-        console.print("Use [bold]pipguard update --force[/bold] to refresh CVE cache immediately.")
+        console.print(
+            "Use [bold]pipguard update --force[/bold] to clear cached analyses immediately."
+        )
 
 
 @app.command()
@@ -240,43 +322,8 @@ def configure():
     import os
     import platform
 
-    BASH_ZSH_FUNC = """
-# pipguard — intercept pip install
-pip() {
-    if [ "$1" = "install" ]; then
-        pipguard install "${@:2}"
-    else
-        command pip "$@"
-    fi
-}
-"""
-
-    FISH_FUNC = """
-# pipguard — intercept pip install
-function pip
-    if test "$argv[1]" = "install"
-        pipguard install $argv[2..]
-    else
-        command pip $argv
-    end
-end
-"""
-
-    POWERSHELL_FUNC = """
-# pipguard — intercept pip install
-function pip {
-    if ($args[0] -eq "install") {
-        pipguard install @($args | Select-Object -Skip 1)
-    } else {
-        & (Get-Command pip -CommandType Application | Select-Object -First 1).Source @args
-    }
-}
-"""
-
-    MARKER = "# pipguard — intercept pip install"
-
     def already_configured(path: Path) -> bool:
-        return path.exists() and MARKER in path.read_text()
+        return path.exists() and HOOK_MARKER in path.read_text()
 
     def append_to(path: Path, content: str):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,7 +367,11 @@ function pip {
         console.print("\nReload your shell or run:")
         console.print(f"  [bold]source {config}[/bold]")
 
-    console.print("\nFrom now on, [bold]pip install <package>[/bold] will automatically run through pipguard.")
+    console.print(
+        "\nFrom now on, [bold]simple single-package pip install <package>[/bold] commands"
+        " will automatically run through pipguard."
+    )
+    console.print("More complex pip install commands will pass through to pip unchanged.")
     console.print("To remove, delete the pip() function from the config file shown above.")
 
 

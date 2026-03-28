@@ -1,6 +1,7 @@
 _WEIGHTS = {
     "known_cve": 50,
     "shell_exec": 40,
+    "dynamic_exec": 40,
     "base64_obfuscation": 35,
     "package_new": 30,
     "home_dir_access": 30,
@@ -46,6 +47,9 @@ def compute(
 
     if analysis_flags.get("shell_exec"):
         add("Shell execution in setup.py", _WEIGHTS["shell_exec"])
+
+    if analysis_flags.get("dynamic_exec"):
+        add("Dynamic execution / obfuscation", _WEIGHTS["dynamic_exec"])
 
     if analysis_flags.get("base64_obfuscation"):
         add("Base64 obfuscation", _WEIGHTS["base64_obfuscation"])
