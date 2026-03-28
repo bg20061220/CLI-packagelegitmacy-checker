@@ -16,6 +16,23 @@ app = typer.Typer(
 )
 
 
+async def _analyze_bounded(name: str, ver: str | None, no_cache: bool, sem: asyncio.Semaphore):
+    """Run _analyze under the scan semaphore; returns (name, result, cached, error)."""
+    async with sem:
+        try:
+            result, cached = await _analyze(name, ver, no_cache)
+            return name, result, cached, None
+        except Exception as e:
+            return name, None, False, e
+
+
+async def _scan_all(packages: list[tuple[str, str | None]], no_cache: bool):
+    sem = asyncio.Semaphore(10)
+    return await asyncio.gather(*[
+        _analyze_bounded(name, ver, no_cache, sem) for name, ver in packages
+    ])
+
+
 async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[dict, bool]:
     """Core analysis pipeline. Returns (result_dict, was_cached)."""
     cache_key = f"full:{package}:{version or 'latest'}"
@@ -152,29 +169,30 @@ def scan(
     fail_score = {"medium": 31, "high": 61}.get(fail_on.lower(), 61)
     exit_code = 0
 
-    for name, ver in packages:
-        console.print(f"[dim]Scanning {name}...[/dim]")
-        try:
-            result, cached = asyncio.run(_analyze(name, ver, no_cache))
-            bd = result["breakdown"]
-            if bd["score"] >= fail_score:
-                display.show_report(
-                    name,
-                    result["metadata"],
-                    result["download_stats"],
-                    result["vulns"],
-                    result["analysis_flags"],
-                    bd,
-                    cached=cached,
-                )
-                if ci:
-                    exit_code = 1
-            else:
-                verdict = bd["verdict"]
-                color = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red"}[verdict]
-                console.print(f"  [{color}]{verdict}[/{color}] {name} (score: {bd['score']})")
-        except Exception as e:
-            console.print(f"[yellow]  Warning: could not scan {name}: {e}[/yellow]")
+    console.print(f"[dim]Scanning {len(packages)} packages...[/dim]")
+    items = asyncio.run(_scan_all(packages, no_cache))
+
+    for name, result, cached, err in items:
+        if err:
+            console.print(f"[yellow]  Warning: could not scan {name}: {err}[/yellow]")
+            continue
+        bd = result["breakdown"]
+        if bd["score"] >= fail_score:
+            display.show_report(
+                name,
+                result["metadata"],
+                result["download_stats"],
+                result["vulns"],
+                result["analysis_flags"],
+                bd,
+                cached=cached,
+            )
+            if ci:
+                exit_code = 1
+        else:
+            verdict = bd["verdict"]
+            color = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red"}[verdict]
+            console.print(f"  [{color}]{verdict}[/{color}] {name} (score: {bd['score']})")
 
     if ci and exit_code:
         raise typer.Exit(exit_code)
