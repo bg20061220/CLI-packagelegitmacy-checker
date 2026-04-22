@@ -11,7 +11,39 @@ _WEIGHTS = {
     "maintainer_new": 20,
     "download_spike": 15,
     "no_github": 10,
+    "recency_bump": 20,            # version released < 7 days ago
+    "spike_bump": 25,              # download spike detected
 }
+
+# Monthly download thresholds for tier bucketing
+_TIER_THRESHOLDS = {
+    "massive": 10_000_000,
+    "large":    1_000_000,
+    "medium":     100_000,
+    "small":       10_000,
+    # below 10k → obscure
+}
+
+# Max score (before CVE override) that each tier can reach
+TRUST_CAP = {
+    "massive": 30,   # well-established packages get benefit of the doubt
+    "large":   45,
+    "medium":  60,
+    "small":   80,
+    "obscure": 100,  # no cap for unknown packages
+}
+
+
+def get_download_tier(monthly_downloads: int) -> str:
+    if monthly_downloads >= _TIER_THRESHOLDS["massive"]:
+        return "massive"
+    if monthly_downloads >= _TIER_THRESHOLDS["large"]:
+        return "large"
+    if monthly_downloads >= _TIER_THRESHOLDS["medium"]:
+        return "medium"
+    if monthly_downloads >= _TIER_THRESHOLDS["small"]:
+        return "small"
+    return "obscure"
 
 
 def compute(
@@ -22,25 +54,24 @@ def compute(
     classifier_context: str,  # 'pure_python' | 'network_expected' | 'ambiguous'
     readme_context: str,       # 'network_expected' | 'pure_python' | 'unknown'
 ) -> dict:
-    score = 0
+    raw_score = 0
+    cve_score = 0
     signals: dict[str, int] = {}
 
-    def add(label: str, pts: int):
-        nonlocal score
-        score += pts
+    def add(label: str, pts: int, *, cve: bool = False):
+        nonlocal raw_score, cve_score
+        if cve:
+            cve_score += pts
+        else:
+            raw_score += pts
         signals[label] = pts
 
     if vulns:
-        add(f"Known CVE ({vulns[0]['id']})", _WEIGHTS["known_cve"])
+        add(f"Known CVE ({vulns[0]['id']})", _WEIGHTS["known_cve"], cve=True)
 
     age_days = metadata.get("age_days")
     if age_days is not None and age_days < 30:
         add(f"Package < 30 days old ({age_days}d)", _WEIGHTS["package_new"])
-
-    spike_pct = download_stats.get("spike_pct")
-    last_month = download_stats.get("last_month") or 0
-    if spike_pct and spike_pct > 300 and last_month < 50_000:
-        add(f"Download spike +{spike_pct:.0f}%", _WEIGHTS["download_spike"])
 
     if not metadata.get("github_url"):
         add("No GitHub repo linked", _WEIGHTS["no_github"])
@@ -78,11 +109,37 @@ def compute(
         else:
             add("Network call in setup.py", _WEIGHTS["network_call_full"])
 
-    if score <= 30:
+    # Determine download tier and cap the raw (non-CVE) score
+    last_month = download_stats.get("last_month") or 0
+    tier = get_download_tier(last_month)
+    capped_score = min(raw_score, TRUST_CAP[tier])
+
+    # Post-cap bumps: recent version release and download spike
+    spike_pct = download_stats.get("spike_pct")
+    version_age_days = metadata.get("version_age_days")
+
+    if version_age_days is not None and version_age_days < 7:
+        capped_score += _WEIGHTS["recency_bump"]
+        signals[f"Version released {version_age_days}d ago"] = _WEIGHTS["recency_bump"]
+
+    if spike_pct and spike_pct > 300 and last_month < 50_000:
+        capped_score += _WEIGHTS["spike_bump"]
+        signals[f"Download spike +{spike_pct:.0f}%"] = _WEIGHTS["spike_bump"]
+
+    # CVE score always applies on top, uncapped
+    final_score = capped_score + cve_score
+
+    if final_score <= 30:
         verdict = "LOW"
-    elif score <= 60:
+    elif final_score <= 60:
         verdict = "MEDIUM"
     else:
         verdict = "HIGH"
 
-    return {"score": score, "verdict": verdict, "signals": signals}
+    return {
+        "score": final_score,
+        "verdict": verdict,
+        "signals": signals,
+        "tier": tier,
+        "capped": raw_score > TRUST_CAP[tier],
+    }

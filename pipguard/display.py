@@ -81,10 +81,58 @@ def show_report(
     verdict = breakdown["verdict"]
     score = breakdown["score"]
     color = _VERDICT_COLOR[verdict]
+
+    # Collect every signal that actually fired
+    active_flags: list[str] = []
+
+    if age is not None and age < 30:
+        active_flags.append(f"Package age only {age}d")
+    elif age is not None and age < 90:
+        active_flags.append(f"Package age {age}d (relatively new)")
+
+    if not metadata.get("github_url"):
+        active_flags.append("No linked GitHub repo")
+
+    if spike and spike > 300 and last_month < 50_000:
+        active_flags.append(f"Download spike +{spike:.0f}% (low-volume package)")
+
+    if vulns:
+        active_flags.append(f"{len(vulns)} known CVE(s) — {vulns[0]['id']}")
+
+    flag_labels = {
+        "network_call": "Network requests in setup code",
+        "env_access": "Env var access in setup code",
+        "shell_exec": "Shell execution in setup code",
+        "base64_obfuscation": "Base64 obfuscation in setup code",
+        "home_dir_access": "Home directory access in setup code",
+    }
+    for key, label in flag_labels.items():
+        if analysis_flags.get(key):
+            active_flags.append(label)
+
+    tier = breakdown.get("tier", "unknown")
+    capped = breakdown.get("capped", False)
+
+    _TIER_TRUST = {
+        "massive": "high-trust",
+        "large":   "high-trust",
+        "medium":  "medium-trust",
+        "small":   "low-trust",
+        "obscure": "low-trust",
+        "unknown": "unknown-trust",
+    }
+    trust_label = _TIER_TRUST[tier]
+    cap_note = "  [dim](score capped by download tier)[/dim]" if capped else ""
+
     console.rule()
     console.print(
         f"  VERDICT:  [{color}]{_VERDICT_LABEL[verdict]}[/{color}]"
         f"  (Score: [bold]{score}[/bold])"
+        f"  [dim]— {tier} package, {trust_label}[/dim]{cap_note}"
     )
+    if active_flags:
+        console.print(f"  [dim]Contributing factors:[/dim]")
+        for flag in active_flags:
+            console.print(f"    [{color}]•[/{color}] {flag}")
     console.rule()
     console.print()
