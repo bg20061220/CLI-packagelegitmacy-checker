@@ -112,8 +112,20 @@ async def _scan_all(packages: list[tuple[str, str | None]], no_cache: bool):
     ])
 
 
-async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[dict, bool]:
-    """Core analysis pipeline. Returns (result_dict, was_cached)."""
+def _is_likely_pypi_package(package: str) -> bool:
+    """Check if package spec looks like a simple PyPI package name."""
+    if not package:
+        return False
+    # Exclude obvious non-PyPI specs
+    if package.startswith(('-', '.', '/', '*', 'git+', 'http://', 'https://', 'file://')):
+        return False
+    if package.endswith(('.whl', '.tar.gz', '.zip')):
+        return False
+    return True
+
+
+async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[dict | None, bool]:
+    """Core analysis pipeline. Returns (result_dict, was_cached) or (None, False) if not on PyPI."""
     cache_key = f"full:{package}:{version or 'latest'}"
 
     if not no_cache:
@@ -121,8 +133,13 @@ async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[d
         if cached:
             return cached, True
 
-    # Fetch metadata first to resolve the exact version, then query OSV with it
-    metadata = await pypi.fetch_metadata(package, version)
+    try:
+        # Fetch metadata first to resolve the exact version, then query OSV with it
+        metadata = await pypi.fetch_metadata(package, version)
+    except Exception:
+        # Package not found on PyPI or other fetch error — return None to trigger fallback
+        return None, False
+
     download_stats, vulns = await asyncio.gather(
         pypi.fetch_download_stats(package),
         osv.check_vulns(package, metadata["version"]),
@@ -165,12 +182,23 @@ def install(
 ):
     """Analyze a package for supply chain risks, then install it."""
     package, version = _split_pinned_package(package, version)
-    try:
-        result, cached = asyncio.run(_analyze(package, version, no_cache))
-    except Exception as e:
-        console.print(f"[red]Analysis failed: {e}[/red]")
-        raise typer.Exit(1)
 
+    # Try analysis for PyPI packages; gracefully skip for non-PyPI sources
+    result, cached = asyncio.run(_analyze(package, version, no_cache))
+
+    if result is None:
+        # Package not found on PyPI — could be GitHub, local, or invalid
+        # Construct install spec and pass through to real pip
+        if version:
+            pkg_spec = f"{package}=={version}"
+        else:
+            pkg_spec = package
+        console.print(f"[yellow]Package not found on PyPI—skipping security analysis.[/yellow]")
+        console.print(f"Installing [bold]{pkg_spec}[/bold]...")
+        subprocess.run([sys.executable, "-m", "pip", "install", pkg_spec], check=True)
+        return
+
+    # Show report for packages that were analyzed
     display.show_report(
         package,
         result["metadata"],
@@ -203,10 +231,10 @@ def info(
 ):
     """Show a risk report without installing."""
     package, version = _split_pinned_package(package, version)
-    try:
-        result, cached = asyncio.run(_analyze(package, version, no_cache))
-    except Exception as e:
-        console.print(f"[red]Analysis failed: {e}[/red]")
+    result, cached = asyncio.run(_analyze(package, version, no_cache))
+
+    if result is None:
+        console.print(f"[yellow]Package '[bold]{package}[/bold]' not found on PyPI.[/yellow]")
         raise typer.Exit(1)
 
     display.show_report(

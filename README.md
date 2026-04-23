@@ -1,4 +1,4 @@
-# pipguard-cli
+# pipguard
 
 Supply chain attack prevention for pip installs. Analyzes Python packages for security risks **before** they touch your system.
 
@@ -7,7 +7,7 @@ pip install pipguard-cli
 pipguard configure
 ```
 
-From that point on, every `pip install` automatically runs through pipguard.
+From that point on, `pip install simple-package-name` automatically runs through pipguard. More complex installs (requirements files, git repos, local paths) pass through to pip unchanged.
 
 ---
 
@@ -44,6 +44,18 @@ Results are combined into a risk score:
 
 ---
 
+## Key Features
+
+✅ **Zero friction** — After one setup command, security checks happen automatically  
+✅ **Non-blocking for trusted packages** — Low-risk packages install instantly  
+✅ **AST-powered code analysis** — Catches obfuscated malicious patterns grep misses  
+✅ **Works with everything** — PyPI packages, GitHub repos, local paths—only analyzes what it can  
+✅ **CI-ready** — `--ci` mode exits with code 1 on threshold for pipeline integration  
+✅ **Instant repeat checks** — 24-hour cache means same package installs are instant  
+✅ **No execution** — Purely static analysis; code is never run
+
+---
+
 ## Example Output
 
 ```
@@ -73,7 +85,7 @@ Proceed anyway? [y/N]
 
 ---
 
-## Installation
+## Installation & Setup
 
 ```bash
 pip install pipguard-cli
@@ -82,13 +94,30 @@ pipguard configure
 
 `configure` writes a shell function to your profile that intercepts `pip install`. Works on bash, zsh, fish, and PowerShell. Close and reopen your terminal after running it.
 
-Simple single-package installs are routed through pipguard automatically. More complex `pip install` commands such as `-r`, `--upgrade`, local paths, or multi-package installs pass through to pip unchanged.
+### What Gets Analyzed
 
-To update pipguard itself, bypass the shell function:
+✅ **Single package names** → analyzed through pipguard  
+❌ **Complex commands** → passed to pip unchanged  
+- `pip install requests` → pipguard analyzes
+- `pip install -r requirements.txt` → direct to pip
+- `pip install ./local/path` → direct to pip
+- `pip install git+https://github.com/user/repo.git` → direct to pip
+- `pip install package1 package2` → direct to pip
+
+### Non-PyPI Packages
+
+If you try to install something not on PyPI (a GitHub repo, local path, or typo):
+- pipguard skips analysis and shows: `"Package not found on PyPI—skipping security analysis."`
+- pip proceeds as normal
+- **No need for workarounds like `python -m pip`** — pipguard gets out of the way automatically
+
+### Updating pipguard Itself
 
 ```bash
 python -m pip install pipguard-cli --upgrade
 ```
+
+(Uses `python -m pip` to bypass the shell alias.)
 
 ---
 
@@ -118,6 +147,48 @@ Exits with code `1` if any package meets the fail threshold, blocking the pipeli
 
 ---
 
+## Real-World Scenarios
+
+### Scenario 1: Typosquatting Attack
+You meant to install `requests` but typo'd it as `requets`:
+```bash
+pip install requets
+# pipguard: "Package 'requets' not found on PyPI"
+# (Protected — install blocked before fake package downloads)
+```
+
+### Scenario 2: Compromised Popular Package
+A popular package's maintainer account gets hacked:
+```bash
+pip install django==3.0  # Very old version suddenly in downloads
+# pipguard: HIGH RISK (Score: 72)
+#   - Package age: 4 years old
+#   - Download spike: +450% above normal
+#   - CVE records present
+# Proceed anyway? [y/N] _
+```
+
+### Scenario 3: New Legitimate Package
+A brand new package launches that you trust:
+```bash
+pip install my-startup-package
+# pipguard: MEDIUM RISK (Score: 45)
+#   - Package age: 2 days old
+#   - No GitHub repo found
+#   - Code analysis: clean
+# Proceed anyway? [y/N] _
+```
+
+### Scenario 4: Dependency Chain
+Your requirements.txt includes 20 packages:
+```bash
+pip install -r requirements.txt
+# pipguard: Passes through to pip
+# (Complex multi-package installs don't block—only simple single-package installs are gated)
+```
+
+---
+
 ## Why AST over grep
 
 pipguard uses Python's AST parser instead of string matching. This catches obfuscated patterns that grep misses:
@@ -135,12 +206,27 @@ Results are cached locally at `~/.pipguard/cache.db` for 24 hours. Repeat instal
 
 ---
 
-## vs. Existing Tools
+## Comparison with Other Tools
 
-| Tool | Gap |
-|------|-----|
-| `pip audit` | Only known CVEs — misses new malicious packages |
-| socket.dev | Not a CLI intercept, requires separate workflow |
-| OSV.dev | Database only, no workflow integration |
-| Dependabot | Reacts after install, not before |
-| **pipguard** | Intercepts at install, combines trust signals + AST analysis |
+| Tool | When it checks | What it checks | Blocks install? | Workflow |
+|------|---|---|---|---|
+| **pip audit** | After install | Known CVEs only | No | Manual command |
+| **socket.dev** | Manual checks | Package risk score | No | Web portal, separate step |
+| **Dependabot** | Scheduled scans | Version updates + CVEs | No | Reacts after merged |
+| **OWASP Dependency-Check** | Build time | Known vulnerabilities | Maybe | CI-only, heavyweight |
+| **pipguard** | **At install time** | **Trust signals + AST analysis** | **Yes** | **Automatic, zero-friction** |
+
+**pipguard wins on prevention, not reaction.** You don't install first and scan later—you prevent the install if something looks wrong.
+
+---
+
+## Quick Comparison Table
+
+| Feature | pipguard | pip audit | Dependabot | socket.dev |
+|---------|----------|-----------|-----------|-----------|
+| Intercepts at install | ✅ | ❌ | ❌ | ❌ |
+| Detects new malicious packages | ✅ | ❌ | ❌ | ✅ |
+| CLI integration | ✅ | ✅ | ❌ | ❌ |
+| AST code analysis | ✅ | ❌ | ❌ | ❌ |
+| Works offline (cached) | ✅ | ✅ | ❌ | ❌ |
+| CI/CD ready | ✅ | ✅ | ✅ | Limited |
