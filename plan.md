@@ -154,6 +154,25 @@ Proceed anyway? [y/N]
 
 ---
 
+## MCP Server Integration (Claude Code)
+
+**Goal:** Let Claude Code analyze packages before `pip install` as part of its agentic flow.
+
+**How it works:**
+1. Claude Code encounters import → calls pipguard MCP tool: `analyze_package("fastapi")`
+2. MCP server runs existing pipguard analysis pipeline
+3. Returns: `{score, verdict, signals, should_install}`
+4. Claude Code prompts user if red flag (HIGH/MEDIUM risk)
+5. User approves or blocks → proceeds with or skips install
+
+**MCP Server exposes two tools:**
+- `analyze_package(name)` — Returns full verdict
+- `quick_check(name)` — Returns verdict enum (GREEN/YELLOW/RED)
+
+**Setup:** User registers MCP server in Claude Code settings.json, Claude Code calls it before running pip.
+
+---
+
 ## vs. Existing Tools
 
 | Tool | Gap |

@@ -50,6 +50,7 @@ Results are combined into a risk score:
 ✅ **Non-blocking for trusted packages** — Low-risk packages install instantly  
 ✅ **AST-powered code analysis** — Catches obfuscated malicious patterns grep misses  
 ✅ **Works with everything** — PyPI packages, GitHub repos, local paths—only analyzes what it can  
+✅ **Claude Code integration** — Automatically checks packages when Claude Code generates code with imports  
 ✅ **CI-ready** — `--ci` mode exits with code 1 on threshold for pipeline integration  
 ✅ **Instant repeat checks** — 24-hour cache means same package installs are instant  
 ✅ **No execution** — Purely static analysis; code is never run
@@ -118,6 +119,72 @@ python -m pip install pipguard-cli --upgrade
 ```
 
 (Uses `python -m pip` to bypass the shell alias.)
+
+---
+
+## Claude Code Integration
+
+pipguard integrates seamlessly with **Claude Code** via the Model Context Protocol (MCP). When Claude Code is generating Python code that imports packages, pipguard automatically checks package legitimacy before installation.
+
+### How It Works
+
+1. Claude Code generates code with `import requests`
+2. Claude Code calls pipguard's `analyze_package` tool via MCP
+3. pipguard returns: score, verdict, risk signals, and recommendation
+4. Claude Code shows you the verdict and asks for confirmation if risky
+5. You approve or reject → install proceeds or blocks
+
+### Setup for Claude Code
+
+pipguard is automatically registered as an MCP server in `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "pipguard": {
+      "command": "python",
+      "args": ["-m", "pipguard.mcp_server"]
+    }
+  }
+}
+```
+
+No additional setup needed—Claude Code loads this automatically.
+
+### Example: Claude Code + pipguard
+
+```
+User: "Build a web scraper using BeautifulSoup"
+
+Claude Code generates:
+  import requests
+  import beautifulsoup4
+  
+[Claude Code calls: analyze_package("requests")]
+  → Response: { verdict: "LOW", score: 15, should_install: true }
+[Claude Code calls: analyze_package("beautifulsoup4")]
+  → Response: { verdict: "LOW", score: 20, should_install: true }
+
+Claude Code: "Installing dependencies... [requests, beautifulsoup4]"
+→ Both install seamlessly (LOW risk)
+
+User: "Actually, let me use this obscure scraping library X"
+
+Claude Code generates:
+  import obscure-lib-x
+  
+[Claude Code calls: analyze_package("obscure-lib-x")]
+  → Response: { verdict: "HIGH", score: 78, signals: ["new package", "no github", "network calls in setup.py"] }
+
+Claude Code: "⚠️ This package flagged as HIGH RISK (Score: 78)
+- New package (2 days old)
+- No GitHub repository
+- Network requests in setup.py
+
+Proceed anyway? [y/N]"
+```
+
+This brings security checks into the AI-assisted development workflow—you never accidentally install a risky package during code generation.
 
 ---
 

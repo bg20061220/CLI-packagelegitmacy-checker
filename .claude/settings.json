@@ -1,0 +1,9 @@
+ {
+    "mcpServers": {
+      "pipguard": {
+        "command": "python",
+        "args": ["-m",
+  "pipguard.mcp_server"]
+      }
+    }
+  }

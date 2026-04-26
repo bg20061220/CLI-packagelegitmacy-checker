@@ -2,6 +2,22 @@
 
 ## Recent Changes
 
+### MCP Server Integration for Claude Code
+**Status**: Implemented (v0.1.5+)
+
+Created `mcp_server.py` to integrate pipguard with Claude Code via the Model Context Protocol (MCP):
+- MCP server exposes `analyze_package(package_name)` tool that Claude Code can call before running `pip install`
+- Claude Code automatically checks package legitimacy during code generation
+- Returns JSON: `{score, verdict, signals, cves, should_install, message}`
+- Registered in `.claude/settings.json` with command: `python -m pipguard.mcp_server`
+- Uses existing `_analyze()` from main.py; no duplication
+
+**How it works**: When Claude Code encounters an import statement, it calls the MCP tool before installing. If HIGH risk, it prompts user for confirmation.
+
+**Why**: Brings security checks into the agentic workflow—users get asked "is this package safe?" at the moment Claude tries to install it.
+
+---
+
 ### Option B: Smart Passthrough for Non-PyPI Packages
 **Status**: Implemented (v0.1.4+)
 
@@ -23,6 +39,7 @@ The install command now gracefully falls back when packages are not on PyPI (e.g
 | File | Description |
 |------|-------------|
 | `main.py` | CLI entry point built with Typer; defines all commands (`install`, `scan`, `info`, `history`, `update`, `configure`) and orchestrates the analysis pipeline. Contains `_analyze()` (graceful fallback for non-PyPI), `_is_likely_pypi_package()` (source detection helper), and `install()`/`info()` commands with fallback handling. |
+| `mcp_server.py` | MCP (Model Context Protocol) server for Claude Code integration. Exposes `analyze_package(package_name)` tool that Claude Code calls before installing. Uses `@server.list_tools()` and `@server.call_tool()` to define and execute the tool. Returns JSON with score, verdict, signals, CVEs, and recommendation. Reuses `_analyze()` from main.py. |
 | `pypi.py` | Fetches package metadata from the PyPI JSON API — package age, version history, maintainer info, linked GitHub repo, and download stats from pypistats.org |
 | `osv.py` | Queries the OSV.dev API for known CVEs and vulnerabilities associated with a package |
 | `github.py` | Fetches GitHub README content for classifier-gated context checks; used to discount network-call flags when a package's stated purpose legitimately requires networking |
@@ -34,8 +51,23 @@ The install command now gracefully falls back when packages are not on PyPI (e.g
 
 ## Testing
 
+### CLI Testing
+
 For local testing without publishing to PyPI:
 1. Install in editable mode: `pip install -e .`
 2. Test valid PyPI packages: `pipguard install requests --yes`
 3. Test non-PyPI fallback: `pipguard install fake-package-xyz` (should show yellow warning and attempt pip install)
 4. Test info command: `pipguard info fake-package-xyz` (should show "not found on PyPI")
+
+### MCP Server Testing
+
+To test the MCP server standalone:
+1. Start the server: `python -m pipguard.mcp_server`
+2. Send a tool call via MCP protocol (requires MCP client; Claude Code does this automatically)
+3. Verify response includes all fields: `status`, `package`, `score`, `verdict`, `signals`, `cves`, `should_install`, `message`
+
+To test with Claude Code:
+1. Open `.claude/settings.json` and verify `mcpServers.pipguard` is configured
+2. In Claude Code, ask it to generate code with an import (e.g., "create a script that uses requests")
+3. Check Claude Code's terminal output—it should call pipguard's `analyze_package` tool
+4. Verify the response formats correctly and Claude Code proceeds/blocks based on verdict
