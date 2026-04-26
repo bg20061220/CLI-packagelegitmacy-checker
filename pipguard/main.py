@@ -173,6 +173,71 @@ async def _analyze(package: str, version: str | None, no_cache: bool) -> tuple[d
     return result, False
 
 
+async def _analyze_github(github_url: str, no_cache: bool) -> tuple[dict | None, bool]:
+    """Analyze a GitHub repository. Returns (result_dict, was_cached) or (None, False) if repo not found."""
+    parsed = github.parse_github_url(github_url)
+    if not parsed:
+        return None, False
+
+    owner, repo, ref = parsed
+    cache_key = f"full:github:{owner}/{repo}:{ref}"
+
+    if not no_cache:
+        cached = cache.get(cache_key)
+        if cached:
+            return cached, True
+
+    # Fetch repo metadata from GitHub API
+    repo_meta = await github.fetch_repo_metadata(owner, repo)
+    if repo_meta is None:
+        return None, False
+
+    # Fetch contributor count
+    contributor_count = await github.fetch_contributor_count(owner, repo)
+
+    # Download and analyze the repo tarball
+    tarball_url = f"https://github.com/{owner}/{repo}/archive/refs/heads/{ref}.tar.gz"
+    try:
+        analysis_flags = await analyzer.analyze_tarball(tarball_url)
+    except Exception:
+        return None, False
+
+    # OSV check — use repo name as package name (best-effort)
+    vulns = await osv.check_vulns(repo, None)
+
+    # Compute score using GitHub-specific logic
+    breakdown = scorer.compute_github(repo_meta, contributor_count, vulns, analysis_flags)
+
+    # Construct metadata dict matching display.show_report() expectations
+    metadata = {
+        "name": f"{owner}/{repo}",
+        "version": ref,
+        "age_days": repo_meta["age_days"],
+        "github_url": f"https://github.com/{owner}/{repo}",
+        "classifiers": [],
+        "maintainer": owner,
+        "tarball_url": tarball_url,
+        "release_count": None,
+        "source": "github",
+        "stargazers_count": repo_meta.get("stargazers_count"),
+        "contributor_count": contributor_count,
+        "license": repo_meta.get("license"),
+        "days_since_push": repo_meta.get("days_since_push"),
+    }
+    download_stats = {"last_week": None, "last_month": None, "spike_pct": None}
+
+    result = {
+        "metadata": metadata,
+        "download_stats": download_stats,
+        "vulns": vulns,
+        "analysis_flags": analysis_flags,
+        "breakdown": breakdown,
+    }
+
+    cache.set(cache_key, result, cache.TTL_TRUST)
+    return result, False
+
+
 @app.command()
 def install(
     package: str = typer.Argument(..., help="Package to analyze and install"),
@@ -183,11 +248,15 @@ def install(
     """Analyze a package for supply chain risks, then install it."""
     package, version = _split_pinned_package(package, version)
 
-    # Try analysis for PyPI packages; gracefully skip for non-PyPI sources
-    result, cached = asyncio.run(_analyze(package, version, no_cache))
+    # Detect GitHub URLs and route to GitHub analysis
+    if github.parse_github_url(package):
+        result, cached = asyncio.run(_analyze_github(package, no_cache))
+    else:
+        # Try analysis for PyPI packages; gracefully skip for non-PyPI sources
+        result, cached = asyncio.run(_analyze(package, version, no_cache))
 
     if result is None:
-        # Package not found on PyPI — could be GitHub, local, or invalid
+        # Package not found on PyPI or GitHub — could be local, or invalid
         # Construct install spec and pass through to real pip
         if version:
             pkg_spec = f"{package}=={version}"
@@ -218,7 +287,12 @@ def install(
         if not Confirm.ask("Proceed anyway?", default=True):
             raise typer.Exit(1)
 
-    pkg_spec = f"{package}=={result['metadata']['version']}"
+    # For GitHub repos, use the GitHub URL directly; for PyPI, use package==version
+    if result["metadata"].get("source") == "github":
+        pkg_spec = package
+    else:
+        pkg_spec = f"{package}=={result['metadata']['version']}"
+
     console.print(f"Installing [bold]{pkg_spec}[/bold]...")
     subprocess.run([sys.executable, "-m", "pip", "install", pkg_spec], check=True)
 
@@ -231,11 +305,18 @@ def info(
 ):
     """Show a risk report without installing."""
     package, version = _split_pinned_package(package, version)
-    result, cached = asyncio.run(_analyze(package, version, no_cache))
 
-    if result is None:
-        console.print(f"[yellow]Package '[bold]{package}[/bold]' not found on PyPI.[/yellow]")
-        raise typer.Exit(1)
+    # Detect GitHub URLs and route to GitHub analysis
+    if github.parse_github_url(package):
+        result, cached = asyncio.run(_analyze_github(package, no_cache))
+        if result is None:
+            console.print(f"[yellow]GitHub repo '[bold]{package}[/bold]' not found.[/yellow]")
+            raise typer.Exit(1)
+    else:
+        result, cached = asyncio.run(_analyze(package, version, no_cache))
+        if result is None:
+            console.print(f"[yellow]Package '[bold]{package}[/bold]' not found on PyPI.[/yellow]")
+            raise typer.Exit(1)
 
     display.show_report(
         package,
@@ -335,7 +416,16 @@ def history():
     for key, value in rows:
         data = json.loads(value)
         bd = data.get("breakdown", {})
-        _, pkg, ver = key.split(":", 2)
+
+        # Parse cache key: "full:package:version" or "full:github:owner/repo:ref"
+        parts = key.split(":", 2)
+        if len(parts) == 3 and parts[1] == "github":
+            _, _, pkg_ref = parts
+            pkg, ver = pkg_ref.rsplit(":", 1)
+            pkg = f"github:{pkg}"
+        else:
+            _, pkg, ver = parts
+
         verdict = bd.get("verdict", "?")
         score = bd.get("score", "?")
         color = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "red"}.get(verdict, "white")

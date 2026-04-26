@@ -13,7 +13,13 @@ _WEIGHTS = {
     "no_github": 10,
     "recency_bump": 20,            # version released < 7 days ago
     "spike_bump": 25,              # download spike detected
+    "repo_new": 30,                # GitHub repo < 30 days old
+    "no_license": 15,              # GitHub repo has no license
+    "zero_stars": 15,              # GitHub repo with zero stars (and age > 30d)
+    "stale_repo": 15,              # Last push > 2 years ago
+    "solo_contributor": 10,        # Only 1 contributor and repo > 90 days old
 }
+
 
 # Monthly download thresholds for tier bucketing
 _TIER_THRESHOLDS = {
@@ -142,4 +148,86 @@ def compute(
         "signals": signals,
         "tier": tier,
         "capped": raw_score > TRUST_CAP[tier],
+    }
+
+
+def compute_github(
+    repo_meta: dict,
+    contributor_count: int | None,
+    vulns: list[dict],
+    analysis_flags: dict,
+) -> dict:
+    """
+    Score a GitHub repository using GitHub-specific signals.
+    repo_meta comes from github.fetch_repo_metadata()
+    contributor_count comes from github.fetch_contributor_count()
+    """
+    raw_score = 0
+    cve_score = 0
+    signals: dict[str, int] = {}
+
+    def add(label: str, pts: int, *, cve: bool = False):
+        nonlocal raw_score, cve_score
+        if cve:
+            cve_score += pts
+        else:
+            raw_score += pts
+        signals[label] = pts
+
+    if vulns:
+        add(f"Known CVE ({vulns[0]['id']})", _WEIGHTS["known_cve"], cve=True)
+
+    age_days = repo_meta.get("age_days", 0)
+    if age_days < 30:
+        add(f"Repo < 30 days old ({age_days}d)", _WEIGHTS["repo_new"])
+
+    if not repo_meta.get("license"):
+        add("No license specified", _WEIGHTS["no_license"])
+
+    stars = repo_meta.get("stargazers_count", 0)
+    if stars == 0 and age_days > 30:
+        add("Zero stars (mature repo)", _WEIGHTS["zero_stars"])
+
+    days_since_push = repo_meta.get("days_since_push", 0)
+    if days_since_push > 730:  # 2 years
+        add(f"Last push {days_since_push}d ago", _WEIGHTS["stale_repo"])
+
+    if contributor_count == 1 and age_days > 90:
+        add("Only 1 contributor (mature repo)", _WEIGHTS["solo_contributor"])
+
+    # AST analysis flags
+    if analysis_flags.get("shell_exec"):
+        add("Shell execution in setup.py", _WEIGHTS["shell_exec"])
+
+    if analysis_flags.get("dynamic_exec"):
+        add("Dynamic execution / obfuscation", _WEIGHTS["dynamic_exec"])
+
+    if analysis_flags.get("base64_obfuscation"):
+        add("Base64 obfuscation", _WEIGHTS["base64_obfuscation"])
+
+    if analysis_flags.get("home_dir_access"):
+        add("Home directory access", _WEIGHTS["home_dir_access"])
+
+    if analysis_flags.get("env_access"):
+        add("Env variable access", _WEIGHTS["env_access"])
+
+    if analysis_flags.get("network_call"):
+        add("Network call in setup.py", _WEIGHTS["network_call_full"])
+
+    # GitHub repos always use "github" tier with no cap
+    final_score = raw_score + cve_score
+
+    if final_score <= 30:
+        verdict = "LOW"
+    elif final_score <= 60:
+        verdict = "MEDIUM"
+    else:
+        verdict = "HIGH"
+
+    return {
+        "score": final_score,
+        "verdict": verdict,
+        "signals": signals,
+        "tier": "github",
+        "capped": False,
     }
