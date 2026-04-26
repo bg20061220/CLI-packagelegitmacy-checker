@@ -25,34 +25,73 @@ def show_report(
     t.add_column(width=28)
     t.add_column()
 
+    is_github = metadata.get("source") == "github"
+
+    # Initialize variables used later in active_flags
     age = metadata.get("age_days")
-    age_str = f"{age}d" if age is not None else "unknown"
-    if age is None:
-        age_icon = "❓"
-    elif age < 30:
-        age_icon = "🔴"
-    elif age < 90:
-        age_icon = "⚠️"
-    else:
-        age_icon = "✅"
-    t.add_row("Package age:", f"{age_str}  {age_icon}")
-
-    t.add_row(
-        "GitHub repo:",
-        "✅ linked" if metadata.get("github_url") else "🔴 none",
-    )
-
     spike = download_stats.get("spike_pct")
     last_month = download_stats.get("last_month") or 0
-    if spike and spike > 300 and last_month < 50_000:
-        t.add_row("Download spike:", f"+{spike:.0f}%  ⚠️")
+
+    if is_github:
+        # GitHub-specific metrics
+        age_str = f"{age}d" if age is not None else "unknown"
+        if age is None:
+            age_status = "[?]"
+        elif age < 30:
+            age_status = "[ALERT]"
+        elif age < 90:
+            age_status = "[WARN]"
+        else:
+            age_status = "[OK]"
+        t.add_row("Repo age:", f"{age_str}  {age_status}")
+
+        stars = metadata.get("stargazers_count", 0)
+        if stars == 0:
+            stars_status = "[ALERT]"
+        elif stars < 10:
+            stars_status = "[WARN]"
+        else:
+            stars_status = "[OK]"
+        t.add_row("Stars:", f"{stars}  {stars_status}")
+
+        from_meta = metadata.get("contributor_count", 0)
+        if from_meta == 1 and age is not None and age > 90:
+            contrib_status = "[ALERT]"
+        elif from_meta is None or from_meta < 2:
+            contrib_status = "[WARN]"
+        else:
+            contrib_status = "[OK]"
+        contrib_str = str(from_meta) if from_meta is not None else "unknown"
+        t.add_row("Contributors:", f"{contrib_str}  {contrib_status}")
     else:
-        t.add_row("Download spike:", "normal  ✅")
+        # PyPI metrics
+        age_str = f"{age}d" if age is not None else "unknown"
+        if age is None:
+            age_status = "[?]"
+        elif age < 30:
+            age_status = "[ALERT]"
+        elif age < 90:
+            age_status = "[WARN]"
+        else:
+            age_status = "[OK]"
+        t.add_row("Package age:", f"{age_str}  {age_status}")
+
+        t.add_row(
+            "GitHub repo:",
+            "[OK] linked" if metadata.get("github_url") else "[ALERT] none",
+        )
+
+        spike = download_stats.get("spike_pct")
+        last_month = download_stats.get("last_month") or 0
+        if spike and spike > 300 and last_month < 50_000:
+            t.add_row("Download spike:", f"+{spike:.0f}%  [WARN]")
+        else:
+            t.add_row("Download spike:", "normal  [OK]")
 
     if vulns:
-        t.add_row("Known vulns:", f"🔴 {len(vulns)} found ({vulns[0]['id']})")
+        t.add_row("Known vulns:", f"[ALERT] {len(vulns)} found ({vulns[0]['id']})")
     else:
-        t.add_row("Known vulns:", "✅ none")
+        t.add_row("Known vulns:", "[OK] none")
 
     console.print(t)
 
@@ -68,7 +107,7 @@ def show_report(
 
         def flag_row(label: str, key: str):
             found = analysis_flags.get(key, False)
-            a.add_row(label, "🔴 FOUND" if found else "✅ NOT FOUND")
+            a.add_row(label, "[ALERT] FOUND" if found else "[OK] NOT FOUND")
 
         flag_row("Network requests:", "network_call")
         flag_row("Env var access:", "env_access")
@@ -85,19 +124,45 @@ def show_report(
     # Collect every signal that actually fired
     active_flags: list[str] = []
 
-    if age is not None and age < 30:
-        active_flags.append(f"Package age only {age}d")
-    elif age is not None and age < 90:
-        active_flags.append(f"Package age {age}d (relatively new)")
+    if is_github:
+        # GitHub-specific flags
+        age = metadata.get("age_days")
+        if age is not None and age < 30:
+            active_flags.append(f"Repo age only {age}d")
+        elif age is not None and age < 90:
+            active_flags.append(f"Repo age {age}d (relatively new)")
 
-    if not metadata.get("github_url"):
-        active_flags.append("No linked GitHub repo")
+        stars = metadata.get("stargazers_count", 0)
+        if stars == 0 and age is not None and age > 30:
+            active_flags.append("Zero stars (mature repo)")
 
-    if spike and spike > 300 and last_month < 50_000:
-        active_flags.append(f"Download spike +{spike:.0f}% (low-volume package)")
+        contrib_count = metadata.get("contributor_count")
+        if contrib_count == 1 and age is not None and age > 90:
+            active_flags.append("Only 1 contributor (mature repo)")
+
+        days_since_push = metadata.get("days_since_push")
+        if days_since_push is not None and days_since_push > 730:
+            active_flags.append(f"Last push {days_since_push}d ago (inactive)")
+
+        if not metadata.get("license"):
+            active_flags.append("No license specified")
+    else:
+        # PyPI-specific flags
+        if age is not None and age < 30:
+            active_flags.append(f"Package age only {age}d")
+        elif age is not None and age < 90:
+            active_flags.append(f"Package age {age}d (relatively new)")
+
+        if not metadata.get("github_url"):
+            active_flags.append("No linked GitHub repo")
+
+        spike = download_stats.get("spike_pct")
+        last_month = download_stats.get("last_month") or 0
+        if spike and spike > 300 and last_month < 50_000:
+            active_flags.append(f"Download spike +{spike:.0f}% (low-volume package)")
 
     if vulns:
-        active_flags.append(f"{len(vulns)} known CVE(s) — {vulns[0]['id']}")
+        active_flags.append(f"{len(vulns)} known CVE(s) - {vulns[0]['id']}")
 
     flag_labels = {
         "network_call": "Network requests in setup code",
@@ -120,19 +185,20 @@ def show_report(
         "small":   "low-trust",
         "obscure": "low-trust",
         "unknown": "unknown-trust",
+        "github":  "unverified",
     }
     trust_label = _TIER_TRUST[tier]
     cap_note = "  [dim](score capped by download tier)[/dim]" if capped else ""
 
-    console.rule()
+    console.print("-" * 80)
     console.print(
         f"  VERDICT:  [{color}]{_VERDICT_LABEL[verdict]}[/{color}]"
         f"  (Score: [bold]{score}[/bold])"
-        f"  [dim]— {tier} package, {trust_label}[/dim]{cap_note}"
+        f"  [dim]- {tier} package, {trust_label}[/dim]{cap_note}"
     )
     if active_flags:
         console.print(f"  [dim]Contributing factors:[/dim]")
         for flag in active_flags:
-            console.print(f"    [{color}]•[/{color}] {flag}")
-    console.rule()
+            console.print(f"    [{color}]*[/{color}] {flag}")
+    console.print("-" * 80)
     console.print()
