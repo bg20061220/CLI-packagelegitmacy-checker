@@ -1,10 +1,18 @@
 """MCP server for pipguard — Claude Code integration."""
 import asyncio
 import json
+import sys
+from datetime import datetime
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
 from pipguard.main import _analyze
+
+
+def log(msg: str):
+    """Log to stderr so it's visible in Claude Code's output."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[pipguard MCP {timestamp}] {msg}", file=sys.stderr, flush=True)
 
 
 server = Server("pipguard")
@@ -13,6 +21,7 @@ server = Server("pipguard")
 @server.list_tools()
 async def list_tools():
     """List available tools."""
+    log("📋 Tool list requested by Claude Code")
     return [
         Tool(
             name="analyze_package",
@@ -39,15 +48,19 @@ async def call_tool(name: str, arguments: dict):
 
     package_name = arguments.get("package_name")
     if not package_name:
+        log("❌ analyze_package called with missing package_name")
         return TextContent(
             type="text",
             text=json.dumps({"status": "error", "message": "package_name is required"})
         )
 
+    log(f"🔍 Analyzing package: {package_name}")
+
     try:
         result, cached = await _analyze(package_name, None, False)
 
         if result is None:
+            log(f"⚠️  Package not found on PyPI: {package_name}")
             return TextContent(
                 type="text",
                 text=json.dumps({
@@ -71,6 +84,9 @@ async def call_tool(name: str, arguments: dict):
         if signal_count > 0:
             msg_parts.append(f"{signal_count} signal(s)")
 
+        emoji = "✅" if verdict in ("LOW", "MEDIUM") else "🚫"
+        log(f"{emoji} {package_name}: {verdict} RISK (score: {score}) • {' • '.join(msg_parts)}")
+
         return TextContent(
             type="text",
             text=json.dumps({
@@ -87,6 +103,7 @@ async def call_tool(name: str, arguments: dict):
             })
         )
     except Exception as e:
+        log(f"❌ Analysis failed for {package_name}: {str(e)}")
         return TextContent(
             type="text",
             text=json.dumps({

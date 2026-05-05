@@ -1,0 +1,23 @@
+name: Dependency Security Scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install pipguard
+        run: pip install pipguard-cli
+
+      - name: Scan dependencies
+        run: pipguard scan --ci --fail-on high
